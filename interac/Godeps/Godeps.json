@@ -1,0 +1,6 @@
+{
+	"ImportPath": "github.com/hayawi/giff_me/interac",
+	"GoVersion": "go1.11",
+	"GodepVersion": "v80",
+	"Deps": []
+}

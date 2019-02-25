@@ -3,18 +3,23 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"math/rand"
 	"net/http"
 	"net/http/httputil"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 )
 
 // PORT holds the port that the server will be communicating on
-const PORT = ":3000"
+const PORT = "3000"
 
 // INTERAC_URL holds the url of the interac API
 const INTERAC_URL = "https://gateway-web.beta.interac.ca/publicapi/api/v2/money-requests/send"
+
+const STREAMER_URL = "https://secret-taiga-61915.herokuapp.com/"
 
 var references map[string]donationOutput
 var refsToCheck []string
@@ -74,11 +79,28 @@ func randomID() string {
 
 func (d *donation) populateFields(r *http.Request) {
 	data, _ := httputil.DumpRequest(r, true)
-	dataParsed := "[{" + strings.Split(string(data), "{")[1] + "]"
-	var decoded = []donation{}
-	dec := json.NewDecoder(strings.NewReader(dataParsed))
-	dec.Decode(&decoded)
-	*d = decoded[0]
+	formBeginIndex := strings.Index(string(data), "name=")
+	//data = []byte(string(data)[0:formBeginIndex] + "{" + string(data)[formBeginIndex:] + "}")
+
+	dataParsed := string(data)[formBeginIndex:]
+
+	splitData := strings.Split(dataParsed, "&")
+	m := make(map[string]string)
+	for _, pair := range splitData {
+		z := strings.Split(pair, "=")
+		m[z[0]] = z[1]
+	}
+
+	d.Name = m["name"]
+	d.Amount, _ = strconv.ParseFloat(m["amount"], 32)
+	d.Email = strings.Replace(m["email"], "%40", "@", -1)
+	d.Message = m["message"]
+
+	// var decoded = []donation{}
+	// dec := json.NewDecoder(strings.NewReader(string(dataJson)))
+	// dec.Decode(&decoded)
+	// log.Println(decoded)
+	// *d = decoded[0]
 }
 
 func (m *moneyRequest) populateFields(name string, email string, amount float64) {
@@ -114,6 +136,8 @@ func sendPaymentRequest(w http.ResponseWriter, r *http.Request) {
 	var request moneyRequest
 
 	data, _ := httputil.DumpRequest(r, true)
+	formBeginIndex := strings.Index(string(data), "name=")
+	data = []byte(string(data)[0:formBeginIndex] + "{" + string(data)[formBeginIndex:] + "}")
 	if len(strings.Split(string(data), "{")) < 2 {
 		return
 	}
@@ -124,42 +148,42 @@ func sendPaymentRequest(w http.ResponseWriter, r *http.Request) {
 	jsone, err := (json.MarshalIndent(&request, "", " "))
 
 	if err != nil {
-		fmt.Println(err.Error)
+		log.Println(err.Error)
 	}
 
-	fmt.Println(json.Valid(jsone), string(jsone))
+	log.Println(json.Valid(jsone), string(jsone))
 
 	req, err := http.NewRequest("POST", INTERAC_URL, strings.NewReader(string(jsone)))
 	if err != nil {
-		fmt.Println(err.Error)
+		log.Println(err.Error)
 	}
 	basicAuth(req)
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		fmt.Println(err.Error)
+		log.Println(err.Error)
 	}
 
 	dec := json.NewDecoder(resp.Body)
 	var response postResp
 	err = dec.Decode(&response)
 	if err != nil {
-		fmt.Println(err.Error)
+		log.Println(err.Error)
 	}
 
-	fmt.Println("sendPaymentRequest() Response:", response)
+	log.Println("sendPaymentRequest() Response:", response)
 	references[response.ReferenceNumber] = donationOutput{Name: donationRequest.Name, Amount: donationRequest.Amount, Message: donationRequest.Message}
 	refsToCheck = append(refsToCheck, response.ReferenceNumber)
 
-	http.Redirect(w, r, "http://www.google.com", 301)
+	fmt.Fprintf(w, "Thank you for using giff.me. Please check your email to confirm payment.")
 }
 
 func checkPaymentProcessed(refNum string, index int) {
 	urlToUse := INTERAC_URL + "?referenceNumber=" + refNum
 	req, err := http.NewRequest("GET", urlToUse, nil)
 	if err != nil {
-		fmt.Println(err.Error)
+		log.Println(err.Error)
 	}
 
 	basicAuth(req)
@@ -167,27 +191,37 @@ func checkPaymentProcessed(refNum string, index int) {
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		fmt.Println(err.Error)
+		log.Println(err.Error)
 	}
 
 	dec := json.NewDecoder(resp.Body)
 	var response []sentMoneyResponse
 	err = dec.Decode(&response)
 	if err != nil {
-		fmt.Println(err.Error)
+		log.Println(err.Error)
 	}
 
-	fmt.Println("checkPaymentProcessed() Response:", response[0])
+	log.Println("checkPaymentProcessed() Response:", response[0])
 
 	if response[0].Status == 8 || response[0].Status == 3 {
-		fmt.Println("Request Completed")
+		log.Println("Request Completed")
+		submitDonation(refNum)
 		delete(references, refNum)
 		refsToCheck = append(refsToCheck[:index], refsToCheck[index+1:]...)
 	} else if response[0].Status == 4 || response[0].Status == 5 || response[0].Status == 6 || response[0].Status == 7 {
-		fmt.Println("Request Failed")
+		log.Println("Request Failed")
 		delete(references, refNum)
 		refsToCheck = append(refsToCheck[:index], refsToCheck[index+1:]...)
 	}
+}
+
+func submitDonation(refNum string) {
+	name := references[refNum].Name
+	message := references[refNum].Message
+	amount := references[refNum].Amount
+	urlToUse := STREAMER_URL + "?name=" + name + "&message=" + message + "&amount=" + fmt.Sprintf("%.2f", amount)
+
+	http.Get(urlToUse)
 }
 
 func iteratePayments() {
@@ -196,10 +230,10 @@ func iteratePayments() {
 	for true {
 		counter += time.Now().UTC().UnixNano() - prevTime
 		prevTime = time.Now().UTC().UnixNano()
-		if counter > 10000000000 {
-			fmt.Println(counter)
+		if counter > 500000000 {
+			log.Println(counter)
 			counter = 0
-			fmt.Println("Checking Responses")
+			log.Println("Checking Responses")
 			for i, ref := range refsToCheck {
 				go checkPaymentProcessed(ref, i)
 			}
@@ -209,8 +243,14 @@ func iteratePayments() {
 
 func main() {
 	references = make(map[string]donationOutput)
+	var portToUse = os.Getenv("PORT")
+	// Set a default port if there is nothing in the environment
+	if portToUse == "" {
+		portToUse = PORT
+		log.Println("INFO: No PORT environment variable detected, defaulting to " + portToUse)
+	}
 	http.HandleFunc("/request", sendPaymentRequest)
-	fmt.Println("Starting server on port" + PORT)
+	log.Println("Starting server on port " + portToUse)
 	go iteratePayments()
-	http.ListenAndServe(PORT, nil)
+	http.ListenAndServe(":"+portToUse, nil)
 }
